@@ -1,0 +1,401 @@
+---
+title: "MovieLens Project"
+author: "Masahiro TAKAOKA"
+date: "2019/11/14"
+output:
+  pdf_document:
+  toc: true
+toc_depth: 2
+number_sections: true
+---
+
+# Overview
+This project is part of HarvardX: PH125.9x Data Science: Capstone course and the purpose of this project is to predict user reviews for movies. This report includes not only prediction but also exploratory data analysis, understanding the uniqueness of the data and searching for a machine learning model suitable for the task.
+
+## Evaluation
+
+$$ RMSE = \sqrt{\frac{1}{N}\displaystyle\sum_{u,i} (\hat{y}_{u,i}-y_{u,i})^{2}} $$
+
+The closer the RMSE is to 0, the smaller the estimated prediction error, that is, the higher the prediction accuracy.
+
+\pagebreak
+
+## Dataset
+The URL of the data set to be used is as follows.
+ https://grouplens.org/datasets/movielens/10m/  
+ http://files.grouplens.org/datasets/movielens/ml-10m.zip
+
+## Data Loading and Create Train and Validation Sets
+There is an instruction from edx in advance about loading and splitting the dataset, and the following code is also provided.
+
+
+```{r, echo = TRUE, message = FALSE, warning = FALSE, eval = TRUE}
+################################
+# Create edx set, validation set
+################################
+
+# Note: this process could take a couple of minutes
+
+if(!require(tidyverse)) install.packages("tidyverse", repos = "http://cran.us.r-project.org")
+if(!require(caret)) install.packages("caret", repos = "http://cran.us.r-project.org")
+if(!require(data.table)) install.packages("data.table", repos = "http://cran.us.r-project.org")
+if(!require(lubridate)) install.packages("lubridate", repos = "http://cran.us.r-project.org")
+
+
+# MovieLens 10M dataset:
+# https://grouplens.org/datasets/movielens/10m/
+# http://files.grouplens.org/datasets/movielens/ml-10m.zip
+
+dl <- tempfile()
+download.file("http://files.grouplens.org/datasets/movielens/ml-10m.zip", dl)
+
+ratings <- fread(text = gsub("::", "\t", readLines(unzip(dl, "ml-10M100K/ratings.dat"))),
+                 col.names = c("userId", "movieId", "rating", "timestamp"))
+
+movies <- str_split_fixed(readLines(unzip(dl, "ml-10M100K/movies.dat")), "\\::", 3)
+colnames(movies) <- c("movieId", "title", "genres")
+movies <- as.data.frame(movies) %>% mutate(movieId = as.numeric(levels(movieId))[movieId],
+                                           title = as.character(title),
+                                           genres = as.character(genres))
+
+movielens <- left_join(ratings, movies, by = "movieId")
+
+# Validation set will be 10% of MovieLens data
+
+set.seed(1)
+test_index <- createDataPartition(y = movielens$rating, times = 1, p = 0.1, list = FALSE)
+edx <- movielens[-test_index,]
+temp <- movielens[test_index,]
+
+# Make sure userId and movieId in validation set are also in edx set
+
+validation <- temp %>% 
+  semi_join(edx, by = "movieId") %>%
+  semi_join(edx, by = "userId")
+
+# Add rows removed from validation set back into edx set
+
+removed <- anti_join(temp, validation)
+edx <- rbind(edx, removed)
+
+rm(dl, ratings, movies, test_index, temp, movielens, removed)
+
+# End of the provided code
+```
+
+
+# Data exploration and visualization
+
+```{r, base}
+# Data overview
+head(edx)
+str(edx)
+summary(edx)
+```
+
+
+```{r}
+# Unique count of movies, users and genres
+n_distinct(edx$movieId)
+n_distinct(edx$userId)
+n_distinct (edx$genres)
+```
+
+```{r}
+# Ratings count
+edx %>% group_by(rating) %>% summarize(count=n()) %>% 
+  arrange(desc(rating))
+
+
+# plot
+edx %>% group_by(rating) %>%
+  summarize(count = n()) %>%
+  ggplot(aes(x = rating, y = count)) +
+  geom_bar(stat = "identity")
+```
+
+# Model Building
+## Create test dataset and train dataset
+
+```{r}
+# set.seed
+set.seed(1)
+test_ind <- createDataPartition(y = edx$rating, times = 1, p = .1, list=FALSE)
+train_ds <- edx[-test_ind,]
+test_ds_temp <- edx[test_ind,]
+
+# Make sure userId and movieId in test dataset are also in train dataset
+test_ds <- test_ds_temp %>% 
+  semi_join(train_ds, by = "movieId") %>%
+  semi_join(train_ds, by = "userId")
+
+# Add rows removed from test_ds_temp dataset back into train dataset
+rmvd <- anti_join(test_ds_temp, test_ds)
+train_ds <- rbind(train_ds, rmvd)
+
+```
+
+
+```{r}
+# Model.1: Computing predicted ratings based on the average of population
+mu_simple <- mean(train_ds$rating)
+mu_simple
+
+mod1_rmse <- RMSE(test_ds$rating, mu_simple)
+mod1_rmse
+```
+
+```{r}
+# Model.2: Computing predicted ratings based on movie effects and user effects
+mu <- mean(train_ds$rating)
+
+# Add movie effect
+movie_effects <- train_ds %>% 
+  group_by(movieId) %>% 
+  summarize(m_effect = mean(rating - mu))
+
+movie_effects %>% qplot(m_effect, geom ="histogram", bins = 30, data = ., color = I("black"))
+
+
+# Add user effect
+user_effects <- train_ds %>% 
+  left_join(movie_effects, by='movieId') %>%
+  group_by(userId) %>%
+  summarize(u_effect = mean(rating - mu - m_effect))
+
+user_effects %>% qplot(u_effect, geom ="histogram", bins = 30, data = ., color = I("black"))
+
+# Predict ratings
+pred_ratings <- test_ds %>% 
+  left_join(movie_effects, by='movieId') %>%
+  left_join(user_effects, by='userId') %>%
+  mutate(pred = mu + m_effect + u_effect) 
+
+mod3_rmse <- RMSE(test_ds$rating, pred_ratings$pred)
+mod3_rmse
+
+head(pred_ratings)
+max(pred_ratings$pred)
+min(pred_ratings$pred)
+
+
+# Adjusting the range of possible values (0~5)
+pred_ratings$pred[pred_ratings$pred > 5] <- 5
+max(pred_ratings$pred)
+
+pred_ratings$pred[pred_ratings$pred < 0] <- 0
+min(pred_ratings$pred)
+
+head(pred_ratings)
+max(pred_ratings$pred)
+min(pred_ratings$pred)
+
+mod3_rmse <- RMSE(test_ds$rating, pred_ratings$pred)
+mod3_rmse
+
+
+```
+
+
+```{r}
+# Model.3: Computing predicted ratings based on movie, user & genre effects
+# Add genre effect
+genre_effects <- train_ds %>% 
+  left_join(movie_effects, by='movieId') %>%
+  left_join(user_effects, by='userId') %>%
+  group_by(genres) %>%
+  summarize(g_effect = mean(rating - mu - m_effect - u_effect))
+
+genre_effects %>% qplot(g_effect, geom ="histogram", bins = 30, data = ., color = I("black"))
+
+# Predict ratings
+pred_ratings <- test_ds %>% 
+  left_join(movie_effects, by='movieId') %>%
+  left_join(user_effects, by='userId') %>%
+  left_join(genre_effects, by='genres') %>%
+  mutate(pred = mu + m_effect + u_effect + g_effect) 
+
+mod4_rmse <- RMSE(test_ds$rating, pred_ratings$pred)
+
+mod4_rmse
+
+head(pred_ratings)
+max(pred_ratings$pred)
+min(pred_ratings$pred)
+
+
+
+# Adjusting the range of possible values (0~5)
+pred_ratings$pred[pred_ratings$pred > 5] <- 5
+max(pred_ratings$pred)
+
+pred_ratings$pred[pred_ratings$pred < 0] <- 0
+min(pred_ratings$pred)
+
+head(pred_ratings)
+
+RMSE(test_ds$rating, pred_ratings$pred)
+
+```
+
+
+```{r}
+# Convert timestamp to year (Sample code below)
+unixtime = 1459995330
+format(as.POSIXct(unixtime, origin="1970-1-1"), format="%Y%m")
+
+# Model.4.1: Computing predicted ratings based on movie, user, genre and year effects
+# Add year effect
+time_effects <- edx %>%
+  left_join(movie_effects, by='movieId') %>%
+  left_join(user_effects, by= 'userId') %>%
+  left_join(genre_effects, by='genres') %>%
+  mutate(timestamp_year = format(as.POSIXct(timestamp, origin="1970-1-1"), format="%Y")) %>%
+  group_by(timestamp_year) %>%
+  summarize(t_effect = mean(rating - mu - m_effect - u_effect -  g_effect))
+
+
+# Predict ratings
+pred_ratings <- test_ds %>%
+  left_join(movie_effects, by='movieId') %>%
+  left_join(user_effects, by= 'userId') %>%
+  left_join(genre_effects, by='genres') %>%
+  mutate(timestamp_year = format(as.POSIXct(timestamp, origin="1970-1-1"), format="%Y")) %>%
+  left_join(time_effects, by= 'timestamp_year') %>%
+  mutate(pred = mu + m_effect + u_effect + g_effect + t_effect) 
+
+
+mod5_rmse <- RMSE(test_ds$rating, pred_ratings$pred)
+
+mod5_rmse
+
+
+pred_ratings$pred[pred_ratings$pred > 5] <- 5
+
+pred_ratings$pred[pred_ratings$pred < 0] <- 0
+mod5_rmse <- RMSE(test_ds$rating, pred_ratings$pred)
+
+mod5_rmse
+
+```
+
+
+```{r}
+# Model.4.2: Computing predicted ratings based on movie, user, genre and month effects
+# Add year effect
+time_effects <- edx %>%
+  left_join(movie_effects, by='movieId') %>%
+  left_join(user_effects, by= 'userId') %>%
+  left_join(genre_effects, by='genres') %>%
+  mutate(timestamp_year = format(as.POSIXct(timestamp, origin="1970-1-1"), format="%Y%m")) %>%
+  group_by(timestamp_year) %>%
+  summarize(t_effect = mean(rating - mu - m_effect - u_effect -  g_effect))
+
+
+# Predict ratings
+pred_ratings <- test_ds %>%
+  left_join(movie_effects, by='movieId') %>%
+  left_join(user_effects, by= 'userId') %>%
+  left_join(genre_effects, by='genres') %>%
+  mutate(timestamp_year = format(as.POSIXct(timestamp, origin="1970-1-1"), format="%Y%m")) %>%
+  left_join(time_effects, by= 'timestamp_year') %>%
+  mutate(pred = mu + m_effect + u_effect + g_effect + t_effect) 
+
+
+mod5_rmse <- RMSE(test_ds$rating, pred_ratings$pred)
+
+mod5_rmse
+
+
+
+pred_ratings$pred[pred_ratings$pred > 5] <- 5
+pred_ratings$pred[pred_ratings$pred < 0] <- 0
+
+
+mod5_rmse <- RMSE(test_ds$rating, pred_ratings$pred)
+
+mod5_rmse
+
+
+```
+
+
+
+```{r}
+# Model.6.3: Computing predicted ratings based on movie, user, genre and day effects
+# Add year effect
+time_effects <- edx %>%
+  left_join(movie_effects, by='movieId') %>%
+  left_join(user_effects, by= 'userId') %>%
+  left_join(genre_effects, by='genres') %>%
+  mutate(timestamp_year = format(as.POSIXct(timestamp, origin="1970-1-1"), format="%Y%m%d")) %>%
+  group_by(timestamp_year) %>%
+  summarize(t_effect = mean(rating - mu - m_effect - u_effect -  g_effect))
+
+
+# Predict ratings
+pred_ratings <- test_ds %>%
+  left_join(movie_effects, by='movieId') %>%
+  left_join(user_effects, by= 'userId') %>%
+  left_join(genre_effects, by='genres') %>%
+  mutate(timestamp_year = format(as.POSIXct(timestamp, origin="1970-1-1"), format="%Y%m%d")) %>%
+  left_join(time_effects, by= 'timestamp_year') %>%
+  mutate(pred = mu + m_effect + u_effect + g_effect + t_effect) 
+
+
+mod5_rmse <- RMSE(test_ds$rating, pred_ratings$pred)
+
+mod5_rmse
+
+
+pred_ratings$pred[pred_ratings$pred > 5] <- 5
+pred_ratings$pred[pred_ratings$pred < 0] <- 0
+
+mod5_rmse <- RMSE(test_ds$rating, pred_ratings$pred)
+
+mod5_rmse
+# 0.8631282
+```
+
+
+# Testing the final model on the Validation dataset
+
+```{r}
+# Testing the final model on the Validation dataset
+predicted_ratings <- validation %>%
+  left_join(movie_effects, by='movieId') %>%
+  left_join(user_effects, by='userId') %>%
+  left_join(genre_effects, by= 'genres') %>%
+  mutate(timestamp_year = format(as.POSIXct(timestamp, origin="1970-1-1"), format="%Y%m%d")) %>%
+  left_join(time_effects, by= 'timestamp_year') %>%
+  mutate(pred = mu + m_effect + u_effect + g_effect + t_effect) 
+
+head(predicted_ratings)
+```
+
+
+# Adjusting the range of possible values (0~5)
+
+```{r}
+ predicted_ratings$pred[predicted_ratings$pred > 5] <- 5
+ max(predicted_ratings$pred)
+
+ predicted_ratings$pred[predicted_ratings$pred < 0] <- 0
+ min(predicted_ratings$pred)
+
+```
+
+# Computing final RMSE
+
+```{r}
+model_rmse <- RMSE(predicted_ratings$pred, validation$rating)
+model_rmse
+```
+
+
+# conclusion
+It was found that only a simple model gives a certain level of accuracy.
+Making a simple model with accuracy is also great in terms of accountability.
+Since the influence of each variable on the predicted value is shown as a clear value, it will be easy to use for explanation to the decision maker.
+I also tried a machine learning model such as Random Forest, but a memory out error occurred and the model was not built.
+The memory problem may be solved by dividing the data set or selecting variables, but that is left for future work.
